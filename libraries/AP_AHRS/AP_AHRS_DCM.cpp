@@ -143,7 +143,7 @@ AP_AHRS_DCM::check_matrix(void)
 {
     if (_dcm_matrix.is_nan()) {
         //Serial.printf("ERROR: DCM matrix NAN\n");
-        reset(true);
+        AP_AHRS_DCM::reset(true);
         return;
     }
     // some DCM matrix values can lead to an out of range error in
@@ -161,7 +161,7 @@ AP_AHRS_DCM::check_matrix(void)
             // in real trouble. All we can do is reset
             //Serial.printf("ERROR: DCM matrix error. _dcm_matrix.c.x=%f\n",
             //	   _dcm_matrix.c.x);
-            reset(true);
+            AP_AHRS_DCM::reset(true);
         }
     }
 }
@@ -241,7 +241,8 @@ AP_AHRS_DCM::normalize(void)
         !renorm(t2, _dcm_matrix.c)) {
         // Our solution is blowing up and we will force back
         // to last euler angles
-        reset(true);
+        _last_failure_ms = hal.scheduler->millis();
+        AP_AHRS_DCM::reset(true);
     }
 }
 
@@ -361,7 +362,7 @@ AP_AHRS_DCM::drift_correction_yaw(void)
     float yaw_error;
     float yaw_deltat;
 
-    if (use_compass()) {
+    if (AP_AHRS_DCM::use_compass()) {
         /*
           we are using compass for yaw
          */
@@ -441,6 +442,11 @@ AP_AHRS_DCM::drift_correction_yaw(void)
     // integration at higher rates
     float spin_rate = _omega.length();
 
+    // sanity check _kp_yaw
+    if (_kp_yaw < AP_AHRS_YAW_P_MIN) {
+        _kp_yaw = AP_AHRS_YAW_P_MIN;
+    }
+
     // update the proportional control to drag the
     // yaw back to the right value. We use a gain
     // that depends on the spin rate. See the fastRotations.pdf
@@ -475,6 +481,11 @@ Vector3f AP_AHRS_DCM::ra_delayed(uint8_t instance, const Vector3f &ra)
     // get the old element, and then fill it with the new element
     Vector3f ret = _ra_delay_buffer[instance];
     _ra_delay_buffer[instance] = ra;
+    if (ret.is_zero()) {
+        // use the current vector if the previous vector is exactly
+        // zero. This prevents an error on initialisation
+        return ra;
+    }
     return ret;
 }
 
@@ -598,6 +609,7 @@ AP_AHRS_DCM::drift_correction(float deltat)
         GA_e.normalize();
         if (GA_e.is_inf()) {
             // wait for some non-zero acceleration information
+            _last_failure_ms = hal.scheduler->millis();
             return;
         }
         using_gps_corrections = true;
@@ -617,7 +629,7 @@ AP_AHRS_DCM::drift_correction(float deltat)
     int8_t besti = -1;
     float best_error = 0;
     for (uint8_t i=0; i<_ins.get_accel_count(); i++) {
-        if (!_ins.get_accel_health()) {
+        if (!_ins.get_accel_health(i)) {
             // only use healthy sensors
             continue;
         }
@@ -628,6 +640,10 @@ AP_AHRS_DCM::drift_correction(float deltat)
             GA_b[i] = ra_delayed(i, _ra_sum[i]);
         } else {
             GA_b[i] = _ra_sum[i];
+        }
+        if (GA_b[i].is_zero()) {
+            // wait for some non-zero acceleration information
+            continue;
         }
         GA_b[i].normalize();
         if (GA_b[i].is_inf()) {
@@ -644,6 +660,7 @@ AP_AHRS_DCM::drift_correction(float deltat)
 
     if (besti == -1) {
         // no healthy accelerometers!
+        _last_failure_ms = hal.scheduler->millis();
         return;
     }
 
@@ -672,7 +689,7 @@ AP_AHRS_DCM::drift_correction(float deltat)
     // reduce the impact of the gps/accelerometers on yaw when we are
     // flat, but still allow for yaw correction using the
     // accelerometers at high roll angles as long as we have a GPS
-    if (use_compass()) {
+    if (AP_AHRS_DCM::use_compass()) {
         if (have_gps() && gps_gain == 1.0f) {
             error[besti].z *= sinf(fabsf(roll));
         } else {
@@ -693,6 +710,7 @@ AP_AHRS_DCM::drift_correction(float deltat)
     if (error[besti].is_nan() || error[besti].is_inf()) {
         // don't allow bad values
         check_matrix();
+        _last_failure_ms = hal.scheduler->millis();
         return;
     }
 
@@ -701,6 +719,11 @@ AP_AHRS_DCM::drift_correction(float deltat)
 
     // base the P gain on the spin rate
     float spin_rate = _omega.length();
+
+    // sanity check _kp value
+    if (_kp < AP_AHRS_RP_P_MIN) {
+        _kp = AP_AHRS_RP_P_MIN;
+    }
 
     // we now want to calculate _omega_P and _omega_I. The
     // _omega_P value is what drags us quickly to the
@@ -824,12 +847,7 @@ AP_AHRS_DCM::euler_angles(void)
     _body_dcm_matrix.rotateXYinv(_trim);
     _body_dcm_matrix.to_euler(&roll, &pitch, &yaw);
 
-    roll_sensor     = degrees(roll)  * 100;
-    pitch_sensor    = degrees(pitch) * 100;
-    yaw_sensor      = degrees(yaw)   * 100;
-
-    if (yaw_sensor < 0)
-        yaw_sensor += 36000;
+    update_cd_values();
 }
 
 /* reporting of DCM state for MAVLink */
@@ -864,14 +882,16 @@ float AP_AHRS_DCM::get_error_yaw(void)
 
 // return our current position estimate using
 // dead-reckoning or GPS
-bool AP_AHRS_DCM::get_position(struct Location &loc)
+bool AP_AHRS_DCM::get_position(struct Location &loc) const
 {
     loc.lat = _last_lat;
     loc.lng = _last_lng;
     loc.alt = _baro.get_altitude() * 100 + _home.alt;
+    loc.flags.relative_alt = 0;
+    loc.flags.terrain_alt = 0;
     location_offset(loc, _position_offset_north, _position_offset_east);
     if (_flags.fly_forward && _have_position) {
-        location_update(loc, degrees(yaw), _gps.ground_speed() * _gps.get_lag());
+        location_update(loc, _gps.ground_course_cd() * 0.01f, _gps.ground_speed() * _gps.get_lag());
     }
     return _have_position;
 }
@@ -914,3 +934,11 @@ void AP_AHRS_DCM::set_home(const Location &loc)
     _home.options = 0;
 }
 
+/*
+  check if the AHRS subsystem is healthy
+*/
+bool AP_AHRS_DCM::healthy(void)
+{
+    // consider ourselves healthy if there have been no failures for 5 seconds
+    return (_last_failure_ms == 0 || hal.scheduler->millis() - _last_failure_ms > 5000);
+}

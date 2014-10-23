@@ -8,14 +8,13 @@ static void init_home()
 
     // copter uses 0 home altitude
     Location loc = gps.location();
-    loc.alt = 0;
 
     ahrs.set_home(loc);
 
     inertial_nav.setup_home_position();
 
     // log new home position which mission library will pull from ahrs
-    if (g.log_bitmask & MASK_LOG_CMD) {
+    if (should_log(MASK_LOG_CMD)) {
         AP_Mission::Mission_Command temp_cmd;
         if (mission.read_cmd_from_storage(0, temp_cmd)) {
             Log_Write_Cmd(temp_cmd);
@@ -23,7 +22,7 @@ static void init_home()
     }
 
     // update navigation scalers.  used to offset the shrinking longitude as we go towards the poles
-    scaleLongDown = longitude_scale(home);
+    scaleLongDown = longitude_scale(loc);
     scaleLongUp   = 1.0f/scaleLongDown;
 }
 

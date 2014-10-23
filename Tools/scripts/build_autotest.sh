@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export PATH=$HOME/.local/bin:/usr/local/bin:$HOME/prefix/bin:$HOME/APM/px4/gcc-arm-none-eabi-4_6-2012q2/bin:$PATH
+export PATH=$HOME/.local/bin:/usr/local/bin:$HOME/prefix/bin:$HOME/APM/px4/gcc-arm-none-eabi-4_7-2014q2/bin:$PATH
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=$HOME/APM
 
@@ -159,6 +159,6 @@ echo $githash > "buildlogs/history/$hdate/githash.txt"
 
 killall -9 JSBSim || /bin/true
 
-timelimit 6500 APM/Tools/autotest/autotest.py --timeout=6000 > buildlogs/autotest-output.txt 2>&1
+timelimit 7500 APM/Tools/autotest/autotest.py --timeout=7000 > buildlogs/autotest-output.txt 2>&1
 
 ) >> build.log 2>&1

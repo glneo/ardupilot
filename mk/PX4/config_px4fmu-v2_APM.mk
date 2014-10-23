@@ -19,6 +19,7 @@ MODULES		+= drivers/stm32/tone_alarm
 MODULES		+= drivers/led
 MODULES		+= drivers/px4fmu
 MODULES		+= drivers/px4io
+MODULES		+= drivers/px4flow
 MODULES		+= drivers/boards/px4fmu-v2
 MODULES		+= drivers/rgbled
 MODULES		+= drivers/lsm303d
@@ -27,6 +28,7 @@ MODULES		+= drivers/mpu6000
 MODULES		+= drivers/hmc5883
 MODULES		+= drivers/ms5611
 MODULES		+= drivers/mb12xx
+MODULES		+= drivers/ll40ls
 MODULES		+= drivers/gps
 MODULES		+= drivers/hil
 #MODULES	+= drivers/hott_telemetry
@@ -61,7 +63,7 @@ MODULES		+= modules/uORB
 MODULES		+= lib/mathlib/math/filter
 MODULES	        += modules/libtomfastmath
 MODULES         += modules/libtomcrypt
-
+MODULES		+= lib/conversion
 
 #
 # Transitional support - add commands from the NuttX export archive.

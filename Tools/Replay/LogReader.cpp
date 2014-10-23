@@ -18,9 +18,10 @@
 
 extern const AP_HAL::HAL& hal;
 
-LogReader::LogReader(AP_InertialSensor &_ins, AP_Baro_HIL &_baro, AP_Compass_HIL &_compass, AP_GPS &_gps, AP_Airspeed &_airspeed) :
+LogReader::LogReader(AP_AHRS &_ahrs, AP_InertialSensor &_ins, AP_Baro_HIL &_baro, AP_Compass_HIL &_compass, AP_GPS &_gps, AP_Airspeed &_airspeed) :
     vehicle(VEHICLE_UNKNOWN),
     fd(-1),
+    ahrs(_ahrs),
     ins(_ins),
     baro(_baro),
     compass(_compass),
@@ -92,6 +93,8 @@ struct PACKED log_Copter_Attitude {
     int16_t pitch;
     uint16_t control_yaw;
     uint16_t yaw;
+    uint16_t error_rp;
+    uint16_t error_yaw;
 };
 
 struct PACKED log_Copter_Nav_Tuning {
@@ -142,15 +145,15 @@ void LogReader::process_plane(uint8_t type, uint8_t *data, uint16_t length)
         }
         memcpy(&msg, data, sizeof(msg));
         wait_timestamp(msg.time_ms);
-        compass.setHIL(Vector3i(msg.mag_x - msg.offset_x, msg.mag_y - msg.offset_y, msg.mag_z - msg.offset_z));
-        compass.set_offsets(msg.offset_x, msg.offset_y, msg.offset_z);
+        compass.setHIL(Vector3f(msg.mag_x - msg.offset_x, msg.mag_y - msg.offset_y, msg.mag_z - msg.offset_z));
+        compass.set_offsets(0, Vector3f(msg.offset_x, msg.offset_y, msg.offset_z));
         break;
     }
 
     case LOG_PLANE_ATTITUDE_MSG: {
         struct log_Plane_Attitude msg;
         if(sizeof(msg) != length) {
-            printf("Bad ATTITUDE length\n");
+            printf("Bad ATTITUDE length %u should be %u\n", (unsigned)length, (unsigned)sizeof(msg));
             exit(1);
         }
         memcpy(&msg, data, sizeof(msg));
@@ -184,8 +187,8 @@ void LogReader::process_rover(uint8_t type, uint8_t *data, uint16_t length)
         }
         memcpy(&msg, data, sizeof(msg));
         wait_timestamp(msg.time_ms);
-        compass.setHIL(Vector3i(msg.mag_x - msg.offset_x, msg.mag_y - msg.offset_y, msg.mag_z - msg.offset_z));
-        compass.set_offsets(msg.offset_x, msg.offset_y, msg.offset_z);
+        compass.setHIL(Vector3f(msg.mag_x - msg.offset_x, msg.mag_y - msg.offset_y, msg.mag_z - msg.offset_z));
+        compass.set_offsets(0, Vector3f(msg.offset_x, msg.offset_y, msg.offset_z));
         break;
     }
 
@@ -214,15 +217,15 @@ void LogReader::process_copter(uint8_t type, uint8_t *data, uint16_t length)
         }
         memcpy(&msg, data, sizeof(msg));
         wait_timestamp(msg.time_ms);
-        compass.setHIL(Vector3i(msg.mag_x - msg.offset_x, msg.mag_y - msg.offset_y, msg.mag_z - msg.offset_z));
-        compass.set_offsets(msg.offset_x, msg.offset_y, msg.offset_z);
+        compass.setHIL(Vector3f(msg.mag_x - msg.offset_x, msg.mag_y - msg.offset_y, msg.mag_z - msg.offset_z));
+        compass.set_offsets(0, Vector3f(msg.offset_x, msg.offset_y, msg.offset_z));
         break;
     }
 
     case LOG_COPTER_ATTITUDE_MSG: {
         struct log_Copter_Attitude msg;
         if(sizeof(msg) != length) {
-            printf("Bad ATTITUDE length\n");
+            printf("Bad ATTITUDE length %u should be %u\n", length, sizeof(msg));
             exit(1);
         }
         memcpy(&msg, data, sizeof(msg));
@@ -249,6 +252,10 @@ void LogReader::process_copter(uint8_t type, uint8_t *data, uint16_t length)
 
 bool LogReader::set_parameter(const char *name, float value)
 {
+    if (strcmp(name, "GPS_TYPE") == 0) {
+        // ignore this one
+        return true;
+    }
     enum ap_var_type var_type;
     AP_Param *vp = AP_Param::find(name, &var_type);
     if (vp == NULL) {
@@ -290,7 +297,9 @@ bool LogReader::update(uint8_t &type)
         if (::read(fd, &f.type, sizeof(f)-3) != sizeof(f)-3) {
             return false;
         }
-        num_formats++;
+        if (num_formats < LOGREADER_MAX_FORMATS-1) {
+            num_formats++;
+        }
         type = f.type;
         return true;
     }
@@ -321,12 +330,18 @@ bool LogReader::update(uint8_t &type)
         if (strncmp(msg.msg, "ArduPlane", strlen("ArduPlane")) == 0) {
             vehicle = VEHICLE_PLANE;
             ::printf("Detected Plane\n");
+            ahrs.set_vehicle_class(AHRS_VEHICLE_FIXED_WING);
+            ahrs.set_fly_forward(true);
         } else if (strncmp(msg.msg, "ArduCopter", strlen("ArduCopter")) == 0) {
             vehicle = VEHICLE_COPTER;
             ::printf("Detected Copter\n");
+            ahrs.set_vehicle_class(AHRS_VEHICLE_COPTER);
+            ahrs.set_fly_forward(false);
         } else if (strncmp(msg.msg, "ArduRover", strlen("ArduRover")) == 0) {
             vehicle = VEHICLE_ROVER;
             ::printf("Detected Rover\n");
+            ahrs.set_vehicle_class(AHRS_VEHICLE_GROUND);
+            ahrs.set_fly_forward(true);
         }
         break;
     }
@@ -461,6 +476,18 @@ bool LogReader::update(uint8_t &type)
         break;        
     }
         
+    case LOG_AHR2_MSG: {
+        struct log_AHRS msg;
+        if(sizeof(msg) != f.length) {
+            printf("Bad AHR2 length %u should be %u\n", (unsigned)f.length, (unsigned)sizeof(msg));
+            exit(1);
+        }
+        memcpy(&msg, data, sizeof(msg));
+        wait_timestamp(msg.time_ms);
+        ahr2_attitude = Vector3f(msg.roll*0.01f, msg.pitch*0.01f, msg.yaw*0.01f);
+        break;
+    }
+
 
     default:
         if (vehicle == VEHICLE_PLANE) {

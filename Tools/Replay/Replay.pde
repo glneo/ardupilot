@@ -17,6 +17,7 @@
 #include <AP_Common.h>
 #include <AP_Progmem.h>
 #include <AP_Param.h>
+#include <StorageManager.h>
 #include <AP_Math.h>
 #include <AP_HAL.h>
 #include <AP_HAL_AVR.h>
@@ -39,20 +40,28 @@
 #include <SITL.h>
 #include <AP_Compass.h>
 #include <AP_Baro.h>
+#include <AP_Baro_Glitch.h>
 #include <AP_InertialSensor.h>
 #include <AP_InertialNav.h>
 #include <AP_NavEKF.h>
 #include <AP_Mission.h>
+#include <AP_Rally.h>
+#include <AP_BattMonitor.h>
+#include <AP_Terrain.h>
 #include <Parameters.h>
 #include <stdio.h>
 #include <getopt.h>
 #include <errno.h>
+#include <fenv.h>
+
+#ifndef INT16_MIN
+#define INT16_MIN -32768
+#define INT16_MAX 32767
+#endif
 
 #include "LogReader.h"
 
 const AP_HAL::HAL& hal = AP_HAL_BOARD_DRIVER;
-
-AP_Param param_loader(var_info, 4096);
 
 static Parameters g;
 
@@ -62,7 +71,8 @@ static AP_GPS gps;
 static AP_Compass_HIL compass;
 static AP_AHRS_NavEKF ahrs(ins, barometer, gps);
 static GPS_Glitch gps_glitch(gps);
-static AP_InertialNav inertial_nav(ahrs, barometer, gps_glitch);
+static Baro_Glitch baro_glitch(barometer);
+static AP_InertialNav inertial_nav(ahrs, barometer, gps_glitch, baro_glitch);
 static AP_Vehicle::FixedWing aparm;
 static AP_Airspeed airspeed(aparm);
 
@@ -72,7 +82,7 @@ SITL sitl;
 
 static const NavEKF &NavEKF = ahrs.get_NavEKF();
 
-static LogReader LogReader(ins, barometer, compass, gps, airspeed);
+static LogReader LogReader(ahrs, ins, barometer, compass, gps, airspeed);
 
 static FILE *plotf;
 static FILE *plotf2;
@@ -84,7 +94,8 @@ static FILE *ekf4f;
 static bool done_parameters;
 static bool done_baro_init;
 static bool done_home_init;
-static uint16_t update_rate;
+static uint16_t update_rate = 50;
+static uint32_t arm_time_ms;
 
 static uint8_t num_user_parameters;
 static struct {
@@ -92,6 +103,8 @@ static struct {
     float value;
 } user_parameters[100];
 
+// setup the var_info table
+AP_Param param_loader(var_info);
 
 static void usage(void)
 {
@@ -100,6 +113,7 @@ static void usage(void)
     ::printf(" -pNAME=VALUE set parameter NAME to VALUE\n");
     ::printf(" -aMASK     set accel mask (1=accel1 only, 2=accel2 only, 3=both)\n");
     ::printf(" -gMASK     set gyro mask (1=gyro1 only, 2=gyro2 only, 3=both)\n");
+    ::printf(" -A time    arm at time milliseconds)\n");
 }
 
 void setup()
@@ -113,7 +127,7 @@ void setup()
 
     hal.util->commandline_arguments(argc, argv);
 
-	while ((opt = getopt(argc, argv, "r:p:ha:g:")) != -1) {
+	while ((opt = getopt(argc, argv, "r:p:ha:g:A:")) != -1) {
 		switch (opt) {
         case 'h':
             usage();
@@ -129,6 +143,10 @@ void setup()
 
         case 'a':
             LogReader.set_accel_mask(strtol(optarg, NULL, 0));
+            break;
+
+        case 'A':
+            arm_time_ms = strtoul(optarg, NULL, 0);
             break;
 
         case 'p':
@@ -173,11 +191,17 @@ void setup()
     LogReader.wait_type(LOG_GPS_MSG);
     LogReader.wait_type(LOG_IMU_MSG);
 
+    feenableexcept(FE_INVALID | FE_OVERFLOW);
+
     ahrs.set_compass(&compass);
     ahrs.set_fly_forward(true);
     ahrs.set_wind_estimation(true);
     ahrs.set_correct_centrifugal(true);
-    
+
+    if (arm_time_ms != 0) {
+        ahrs.set_armed(false);
+    }
+
     barometer.init();
     barometer.setHIL(0);
     barometer.read();
@@ -206,12 +230,12 @@ void setup()
     ekf3f = fopen("EKF3.dat", "w");
     ekf4f = fopen("EKF4.dat", "w");
 
-    fprintf(plotf, "time SIM.Roll SIM.Pitch SIM.Yaw BAR.Alt FLIGHT.Roll FLIGHT.Pitch FLIGHT.Yaw FLIGHT.dN FLIGHT.dE FLIGHT.Alt DCM.Roll DCM.Pitch DCM.Yaw EKF.Roll EKF.Pitch EKF.Yaw INAV.dN INAV.dE INAV.Alt EKF.dN EKF.dE EKF.Alt\n");
+    fprintf(plotf, "time SIM.Roll SIM.Pitch SIM.Yaw BAR.Alt FLIGHT.Roll FLIGHT.Pitch FLIGHT.Yaw FLIGHT.dN FLIGHT.dE FLIGHT.Alt AHR2.Roll AHR2.Pitch AHR2.Yaw DCM.Roll DCM.Pitch DCM.Yaw EKF.Roll EKF.Pitch EKF.Yaw INAV.dN INAV.dE INAV.Alt EKF.dN EKF.dE EKF.Alt\n");
     fprintf(plotf2, "time E1 E2 E3 VN VE VD PN PE PD GX GY GZ WN WE MN ME MD MX MY MZ E1ref E2ref E3ref\n");
     fprintf(ekf1f, "timestamp TimeMS Roll Pitch Yaw VN VE VD PN PE PD GX GY GZ\n");
     fprintf(ekf2f, "timestamp TimeMS AX AY AZ VWN VWE MN ME MD MX MY MZ\n");
     fprintf(ekf3f, "timestamp TimeMS IVN IVE IVD IPN IPE IPD IMX IMY IMZ IVT\n");
-    fprintf(ekf4f, "timestamp TimeMS SV SP SH SMX SMY SMZ SVT OFN EFE\n");
+    fprintf(ekf4f, "timestamp TimeMS SV SP SH SMX SMY SMZ SVT OFN EFE FS DS\n");
 
     ahrs.set_ekf_use(true);
 
@@ -301,6 +325,14 @@ void loop()
 {
     while (true) {
         uint8_t type;
+
+        if (arm_time_ms != 0 && hal.scheduler->millis() > arm_time_ms) {
+            if (!ahrs.get_armed()) {
+                ahrs.set_armed(true);
+                ::printf("Arming at %u ms\n", (unsigned)hal.scheduler->millis());
+            }
+        }
+
         if (!LogReader.update(type)) {
             ::printf("End of log at %.1f seconds\n", hal.scheduler->millis()*0.001f);
             fclose(plotf);
@@ -332,6 +364,8 @@ void loop()
             Vector3f magVar;
             float tasVar;
             Vector2f offset;
+            uint8_t faultStatus;
+            float deltaGyroBias;
 
             const Matrix3f &dcm_matrix = ((AP_AHRS_DCM)ahrs).get_dcm_matrix();
             dcm_matrix.to_euler(&DCM_attitude.x, &DCM_attitude.y, &DCM_attitude.z);
@@ -345,12 +379,13 @@ void loop()
             NavEKF.getMagXYZ(magXYZ);
             NavEKF.getInnovations(velInnov, posInnov, magInnov, tasInnov);
             NavEKF.getVariances(velVar, posVar, hgtVar, magVar, tasVar, offset);
+            NavEKF.getFilterFaults(faultStatus,deltaGyroBias);
             NavEKF.getPosNED(ekf_relpos);
             Vector3f inav_pos = inertial_nav.get_position() * 0.01f;
             float temp = degrees(ekf_euler.z);
 
             if (temp < 0.0f) temp = temp + 360.0f;
-            fprintf(plotf, "%.3f %.1f %.1f %.1f %.2f %.1f %.1f %.1f %.2f %.2f %.2f %.1f %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.2f %.2f %.2f\n",
+            fprintf(plotf, "%.3f %.1f %.1f %.1f %.2f %.1f %.1f %.1f %.2f %.2f %.2f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.2f %.2f %.2f\n",
                     hal.scheduler->millis() * 0.001f,
                     LogReader.get_sim_attitude().x,
                     LogReader.get_sim_attitude().y,
@@ -358,10 +393,13 @@ void loop()
                     barometer.get_altitude(),
                     LogReader.get_attitude().x,
                     LogReader.get_attitude().y,
-                    LogReader.get_attitude().z,
+                    wrap_180_cd(LogReader.get_attitude().z*100)*0.01f,
                     LogReader.get_inavpos().x,
                     LogReader.get_inavpos().y,
                     LogReader.get_relalt(),
+                    LogReader.get_ahr2_attitude().x,
+                    LogReader.get_ahr2_attitude().y,
+                    wrap_180_cd(LogReader.get_ahr2_attitude().z*100)*0.01f,
                     degrees(DCM_attitude.x),
                     degrees(DCM_attitude.y),
                     degrees(DCM_attitude.z),
@@ -488,18 +526,19 @@ void loop()
                     innovVT);
 
             // define messages for EKF4 data packet
-            int16_t sqrtvarV = (int16_t)(100*velVar);
-            int16_t sqrtvarP = (int16_t)(100*posVar);
-            int16_t sqrtvarH = (int16_t)(100*hgtVar);
-            int16_t sqrtvarMX = (int16_t)(100*magVar.x);
-            int16_t sqrtvarMY = (int16_t)(100*magVar.y);
-            int16_t sqrtvarMZ = (int16_t)(100*magVar.z);
-            int16_t sqrtvarVT = (int16_t)(100*tasVar);
-            int16_t offsetNorth = (int8_t)(offset.x);
-            int16_t offsetEast = (int8_t)(offset.y);
+            int16_t sqrtvarV = (int16_t)(constrain_float(100*velVar,INT16_MIN,INT16_MAX));
+            int16_t sqrtvarP = (int16_t)(constrain_float(100*posVar,INT16_MIN,INT16_MAX));
+            int16_t sqrtvarH = (int16_t)(constrain_float(100*hgtVar,INT16_MIN,INT16_MAX));
+            int16_t sqrtvarMX = (int16_t)(constrain_float(100*magVar.x,INT16_MIN,INT16_MAX));
+            int16_t sqrtvarMY = (int16_t)(constrain_float(100*magVar.y,INT16_MIN,INT16_MAX));
+            int16_t sqrtvarMZ = (int16_t)(constrain_float(100*magVar.z,INT16_MIN,INT16_MAX));
+            int16_t sqrtvarVT = (int16_t)(constrain_float(100*tasVar,INT16_MIN,INT16_MAX));
+            int16_t offsetNorth = (int8_t)(constrain_float(offset.x,INT16_MIN,INT16_MAX));
+            int16_t offsetEast = (int8_t)(constrain_float(offset.y,INT16_MIN,INT16_MAX));
+            uint8_t divergeRate = (uint8_t)(100*deltaGyroBias);
 
             // print EKF4 data packet
-            fprintf(ekf4f, "%.3f %d %d %d %d %d %d %d %d %d %d\n",
+            fprintf(ekf4f, "%.3f %d %d %d %d %d %d %d %d %d %d %d %d\n",
                     hal.scheduler->millis() * 0.001f,
                     hal.scheduler->millis(),
                     sqrtvarV,
@@ -510,7 +549,9 @@ void loop()
                     sqrtvarMZ,
                     sqrtvarVT,
                     offsetNorth,
-                    offsetEast);
+                    offsetEast,
+                    faultStatus,
+                    divergeRate);
         }
     }
 }

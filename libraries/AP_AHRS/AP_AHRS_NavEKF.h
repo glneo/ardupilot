@@ -28,13 +28,14 @@
 #include <AP_NavEKF.h>
 
 #define AP_AHRS_NAVEKF_AVAILABLE 1
+#define AP_AHRS_NAVEKF_SETTLE_TIME_MS 20000     // time in milliseconds the ekf needs to settle after being started
 
 class AP_AHRS_NavEKF : public AP_AHRS_DCM
 {
 public:
     // Constructor
     AP_AHRS_NavEKF(AP_InertialSensor &ins, AP_Baro &baro, AP_GPS &gps) :
-        AP_AHRS_DCM(ins, baro, gps),
+    AP_AHRS_DCM(ins, baro, gps),
         EKF(this, baro),
         ekf_started(false),
         startup_delay_ms(10000)
@@ -42,7 +43,7 @@ public:
         }
 
     // return the smoothed gyro vector corrected for drift
-    const Vector3f get_gyro(void) const;
+    const Vector3f &get_gyro(void) const;
     const Matrix3f &get_dcm_matrix(void) const;
 
     // return the current drift correction integrator value
@@ -55,7 +56,7 @@ public:
     void reset_attitude(const float &roll, const float &pitch, const float &yaw);
 
     // dead-reckoning support
-    bool get_position(struct Location &loc);
+    bool get_position(struct Location &loc) const;
 
     // status reporting of estimated error
     float           get_error_rp(void);
@@ -92,6 +93,12 @@ public:
 
     void set_ekf_use(bool setting) { _ekf_use.set(setting); }
 
+    // is the AHRS subsystem healthy?
+    bool healthy(void);
+
+    // true if the AHRS has completed initialisation
+    bool initialised(void) const;
+
 private:
     bool using_EKF(void) const;
 
@@ -99,6 +106,8 @@ private:
     bool ekf_started;
     Matrix3f _dcm_matrix;
     Vector3f _dcm_attitude;
+    Vector3f _gyro_bias;
+    Vector3f _gyro_estimate;
     const uint16_t startup_delay_ms;
     uint32_t start_time_ms;
 };

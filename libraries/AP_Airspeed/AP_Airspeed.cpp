@@ -51,13 +51,21 @@ extern const AP_HAL::HAL& hal;
 #elif CONFIG_HAL_BOARD == HAL_BOARD_LINUX
  #define ARSPD_DEFAULT_PIN AP_AIRSPEED_I2C_PIN
 #elif CONFIG_HAL_BOARD == HAL_BOARD_VRBRAIN
-#if defined(CONFIG_ARCH_BOARD_VRBRAIN_V4)
+#if defined(CONFIG_ARCH_BOARD_VRBRAIN_V40)
  #define ARSPD_DEFAULT_PIN 0
-#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V5)
+#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V45)
  #define ARSPD_DEFAULT_PIN 0
-#elif defined(CONFIG_ARCH_BOARD_VRHERO_V1)
+#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V50)
+ #define ARSPD_DEFAULT_PIN 0
+#elif defined(CONFIG_ARCH_BOARD_VRBRAIN_V51)
+ #define ARSPD_DEFAULT_PIN 0
+#elif defined(CONFIG_ARCH_BOARD_VRUBRAIN_V51)
+ #define ARSPD_DEFAULT_PIN 0
+#elif defined(CONFIG_ARCH_BOARD_VRHERO_V10)
  #define ARSPD_DEFAULT_PIN 0
 #endif
+#elif CONFIG_HAL_BOARD == HAL_BOARD_LINUX
+ #define ARSPD_DEFAULT_PIN AP_AIRSPEED_I2C_PIN
 #else
  #define ARSPD_DEFAULT_PIN 0
 #endif
@@ -135,6 +143,10 @@ float AP_Airspeed::get_pressure(void)
     if (!_enable) {
         return 0;
     }
+    if (_hil_set) {
+        _healthy = true;
+        return _hil_pressure;
+    }
     float pressure = 0;
     if (_pin == AP_AIRSPEED_I2C_PIN) {
         _healthy = digital.get_differential_pressure(pressure);
@@ -203,7 +215,7 @@ void AP_Airspeed::read(void)
     switch ((enum pitot_tube_order)_tube_order.get()) {
     case PITOT_TUBE_ORDER_NEGATIVE:
         airspeed_pressure = -airspeed_pressure;
-        // fall thru
+        // no break
     case PITOT_TUBE_ORDER_POSITIVE:
         if (airspeed_pressure < -32) {
             // we're reading more than about -8m/s. The user probably has
@@ -228,5 +240,8 @@ void AP_Airspeed::setHIL(float airspeed, float diff_pressure, float temperature)
     _raw_airspeed = airspeed;
     _airspeed = airspeed;
     _last_pressure = diff_pressure;
-    _last_update_ms         = hal.scheduler->millis();    
+    _last_update_ms = hal.scheduler->millis();    
+    _hil_pressure = diff_pressure;
+    _hil_set = true;
+    _healthy = true;
 }
